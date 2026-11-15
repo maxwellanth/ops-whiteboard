@@ -2,10 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Excalidraw, CaptureUpdateAction, exportToSvg, exportToBlob, MainMenu, viewportCoordsToSceneCoords, getCommonBounds } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { applyOp, mergeBoards, normalizeBoard, sortedProjects, snapshotHtml, statusView, ago, uid } from "./model.js";
-import { buildManaged, isManaged } from "./scene.js";
+import { buildManaged, isManaged, CARD_PAD } from "./scene.js";
 import { ConflictError, AuthError } from "./ghstore.js";
 import { detectConnection, saveCredentials, forgetToken, tokenTemplateUrl } from "./connection.js";
 import { ProjectPanel, HistoryPanel, SetupScreen, SettingsPanel } from "./panels.jsx";
+import { installInputRouting } from "./input.js";
+import Loupe from "./Loupe.jsx";
+
+// The board has ONE fixed scale (like a real whiteboard): no pinch, wheel or button zoom.
+// Phones use a scale where the marker writing reads comfortably; wider screens a little larger.
+const BOARD_Z = typeof window !== "undefined" && window.innerWidth < 700 ? 0.4 : 0.6;
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 const draftKey = (repo) => "ow.draft." + repo;
@@ -21,10 +27,11 @@ export default function App({ initialConn }) {
   const [panel, setPanel] = useState(null); // {type:'project', pid} | {type:'history'} | {type:'settings'}
   const [selectedPid, setSelectedPid] = useState(null);
   const [focusPid, setFocusPid] = useState(null); // last project zoomed to from a magnet
-  // Phones open in "look" mode: no drawing toolbar over the board; pan/zoom with fingers, tap a project to read it.
-  // The "draw" marker in the tray switches the full Excalidraw toolset on. Wide screens start in draw mode.
+  // Drawing is always on: a pen (e.g. S Pen) writes with the marker; fingers only pan and tap.
+  // The "tools" marker shows Excalidraw's full toolbar (eraser, colours, select). Phones start with it hidden.
   const [drawMode, setDrawMode] = useState(() => window.innerWidth >= 700);
-  const tapRef = useRef(null);
+  const [loupe, setLoupe] = useState(null); // {x, y} centre in canvas coordinates, or null
+  const canvasRef = useRef(null);
   const doc = useRef({ board: null, base: null, sha: null, commit: null, fetchedAt: null, rev: 0, savedRev: 0, msgs: [], pushing: false, generated: new Map(), manualSig: 0 });
   const timers = useRef({});
 
@@ -117,7 +124,7 @@ export default function App({ initialConn }) {
           setTimeout(push, 500);
         }
         render();
-        setTimeout(() => api?.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.95 }), 60);
+        setTimeout(defaultView, 60);
       } else if (remote.sha !== d.sha) {
         if (d.rev === d.savedRev && !d.pushing) { d.base = normalizeBoard(remote.board); d.board = clone(d.base); d.sha = remote.sha; d.commit = null; render(); showToast(`Board updated: ${d.board.log[0]?.by || "someone"}: ${d.board.log[0]?.msg || ""}`, "info", 5000); }
         else push();
@@ -155,6 +162,10 @@ export default function App({ initialConn }) {
   // ---------- user edits on the canvas ----------
   const onChange = useCallback((elements, appState) => {
     const d = doc.current;
+    if (appState.zoom.value !== BOARD_Z && api) { // the board never zooms: undo any zoom that slipped through, keeping the centre
+      const z0 = appState.zoom.value, cx = appState.width / (2 * z0) - appState.scrollX, cy = appState.height / (2 * z0) - appState.scrollY;
+      queueMicrotask(() => api.updateScene({ appState: { zoom: { value: BOARD_Z }, scrollX: appState.width / (2 * BOARD_Z) - cx, scrollY: appState.height / (2 * BOARD_Z) - cy }, captureUpdate: CaptureUpdateAction.NEVER }));
+    }
     if (!d.board) return;
     const manual = elements.filter((e) => !isManaged(e));
     const sig = elSig(manual);
@@ -168,7 +179,7 @@ export default function App({ initialConn }) {
         // Only a real drag counts as a move: compare with where we drew the card, and never save default positions.
         for (const p of Object.values(d.board.projects)) {
           const card = els.find((e) => e.id === `m:${p.id}:card`), g = d.genPos?.[p.id];
-          if (card && !card.isDeleted && g && (Math.abs(card.x - g.x) > 1 || Math.abs(card.y - g.y) > 1)) { p.pos = { x: Math.round(card.x), y: Math.round(card.y) }; moved = true; }
+          if (card && !card.isDeleted && g && (Math.abs(card.x + CARD_PAD - g.x) > 1 || Math.abs(card.y + CARD_PAD - g.y) > 1)) { p.pos = { x: Math.round(card.x + CARD_PAD), y: Math.round(card.y + CARD_PAD) }; moved = true; }
         }
         // Only a real text change or a deletion counts as an edit; internal version bumps (font re-measuring) do not.
         edited = els.some((e) => isManaged(e) && d.genText?.has(e.id) && (e.isDeleted || e.text !== d.genText.get(e.id)));
@@ -184,14 +195,10 @@ export default function App({ initialConn }) {
     setSelectedPid((cur) => (cur === pid ? cur : pid));
   }, [api, markDirty, render, showToast]);
 
-  // ---------- tap a project island to open its details (works in look and draw mode) ----------
-  const onCanvasPointerDown = (e) => { if (e.isPrimary) tapRef.current = { x: e.clientX, y: e.clientY, t: Date.now() }; };
-  const onCanvasPointerUp = (e) => {
-    const t = tapRef.current; tapRef.current = null;
-    if (!t || !api || !e.isPrimary || Math.hypot(e.clientX - t.x, e.clientY - t.y) > 8 || Date.now() - t.t > 450) return;
-    if (drawMode && api.getAppState().activeTool.type !== "selection") return; // don't hijack a drawing tool
-    const st = api.getAppState();
-    const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, st);
+  // ---------- input: fixed scale, finger pans/taps, pen draws ----------
+  const openAt = (clientX, clientY) => {
+    if (!api) return;
+    const { x, y } = viewportCoordsToSceneCoords({ clientX, clientY }, api.getAppState());
     const byPid = {};
     for (const el of api.getSceneElements()) { const pid = el.customData?.pid; if (pid && pid !== "_hq" && pid !== "_" && el.customData.role !== "hub" && el.customData.role !== "rel") (byPid[pid] ||= []).push(el); }
     for (const [pid, els] of Object.entries(byPid)) {
@@ -199,20 +206,41 @@ export default function App({ initialConn }) {
       if (x >= x1 && x <= x2 && y >= y1 && y <= y2 && doc.current.board?.projects[pid]) { setFocusPid(pid); setPanel({ type: "project", pid }); focus(pid, sheetPeekPx()); return; }
     }
   };
+  const openAtRef = useRef(openAt); openAtRef.current = openAt;
+  useEffect(() => {
+    if (!api || !canvasRef.current) return;
+    // Phones: marker pen ready so the first S Pen stroke draws; pen mode makes Excalidraw ignore finger touches.
+    if (window.innerWidth < 700) api.setActiveTool({ type: "freedraw" });
+    api.updateScene({ appState: { penMode: true, zoom: { value: BOARD_Z } }, captureUpdate: CaptureUpdateAction.NEVER });
+    if (["127.0.0.1", "localhost"].includes(location.hostname)) window.__opsBoard = { api, BOARD_Z }; // local testing only
+    return installInputRouting(canvasRef.current, { getApi: () => api, getZoom: () => BOARD_Z, onTap: (x, y) => openAtRef.current(x, y) });
+  }, [api]);
+  // Mouse clicks on desktop: open the project when the select tool is active
+  const onMouseClick = (e) => {
+    if (e.pointerType && e.pointerType !== "mouse") return;
+    if (api?.getAppState().activeTool.type === "selection" && e.target instanceof HTMLCanvasElement) openAt(e.clientX, e.clientY);
+  };
 
   // ---------- navigation and export ----------
-  // Zoom to one project island. On phones, when the details sheet covers the bottom, fit the island into the visible top part.
-  const focus = (pid, sheetPx = 0) => {
-    const els = api.getSceneElements().filter((e) => e.customData?.pid === pid && e.customData.role !== "hub" && e.customData.role !== "rel");
-    if (!els.length) return;
-    if (!sheetPx) return api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: 0.88, animate: true, duration: 450 });
-    const vh = api.getAppState().height;
-    api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: Math.max(0.3, (vh - sheetPx) / vh) * 0.92 });
-    const st = api.getAppState();
-    api.updateScene({ appState: { scrollY: st.scrollY - sheetPx / 2 / st.zoom.value }, captureUpdate: CaptureUpdateAction.NEVER });
-  };
+  // Pan (never zoom) so these scene bounds sit in the middle of the visible area above `bottomPx`.
+  function panTo([x1, y1, x2, y2], { bottomPx = 0, topAlign = false } = {}) {
+    const st = api.getAppState(), z = BOARD_Z, visH = st.height - bottomPx;
+    const cy = topAlign && (y2 - y1) * z > visH ? y1 + visH / (2 * z) - 30 / z : (y1 + y2) / 2;
+    api.updateScene({ appState: { zoom: { value: z }, scrollX: st.width / (2 * z) - (x1 + x2) / 2, scrollY: visH / (2 * z) - cy }, captureUpdate: CaptureUpdateAction.NEVER });
+  }
+  const projectEls = (pid) => api.getSceneElements().filter((e) => e.customData?.pid === pid && !["hub", "rel"].includes(e.customData.role));
+  // Opening view: the top-priority project on phones, the hub on wider screens. Never auto-fit tiny writing.
+  function defaultView() {
+    if (!api) return;
+    if (window.innerWidth < 700 && api.getAppState().activeTool.type === "selection") api.setActiveTool({ type: "freedraw" }); // pen ready on phones
+    const top = doc.current.board && sortedProjects(doc.current.board)[0];
+    const els = window.innerWidth < 700 && top ? projectEls(top.id) : api.getSceneElements().filter((e) => e.customData?.pid === "_hq");
+    if (els.length) panTo(getCommonBounds(els), { topAlign: true });
+  }
+  const focus = (pid, sheetPx = 0) => { const els = projectEls(pid); if (els.length) panTo(getCommonBounds(els), { bottomPx: sheetPx, topAlign: true }); };
+  // "home": back to the hub in the middle of the web (same scale)
+  const overview = () => { const els = api.getSceneElements().filter((e) => e.customData?.pid === "_hq"); if (els.length) panTo(getCommonBounds(els)); };
   const sheetPeekPx = () => (window.innerWidth < 700 ? Math.round(window.innerHeight * 0.46) : 0);
-  const overview = () => api.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.92, animate: true, duration: 450 });
 
   const download = (blob, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); };
   const stamp = () => new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
@@ -253,7 +281,7 @@ export default function App({ initialConn }) {
   return (
     <div className="shell">
       <header className="topline">
-        <div className="brand" onClick={overview} title="Zoom out to the whole operation">Ops Whiteboard</div>
+        <div className="brand" onClick={overview} title="Back to the middle of the board">Ops Whiteboard</div>
         <div className={"pill " + pill.kind} title={pill.text}>{pill.text}</div>
         <button className="gear" onClick={() => setPanel({ type: "settings" })} aria-label="Connection and privacy" title="Connection and privacy">⚙</button>
       </header>
@@ -268,29 +296,30 @@ export default function App({ initialConn }) {
         ))}
       </div>
       <div className="board-frame">
-      <main className={"canvas" + (drawMode ? " drawing" : " looking")} onPointerDownCapture={onCanvasPointerDown} onPointerUpCapture={onCanvasPointerUp}>
-        <Excalidraw excalidrawAPI={setApi} onChange={onChange} name="Ops Whiteboard" theme="light" viewModeEnabled={!drawMode}
-          initialData={{ elements: [], appState: { viewBackgroundColor: "#ffffff", currentItemFontFamily: 5, currentItemRoughness: 2, currentItemStrokeWidth: 2, currentItemStrokeColor: "#1c4fa1" } }}
+      <main ref={canvasRef} className={"canvas" + (drawMode ? " drawing" : " looking")} onClick={onMouseClick}>
+        <Excalidraw excalidrawAPI={setApi} onChange={onChange} name="Ops Whiteboard" theme="light"
+          initialData={{ elements: [], appState: { viewBackgroundColor: "#ffffff", currentItemFontFamily: 5, currentItemRoughness: 2, currentItemStrokeWidth: 2, currentItemStrokeColor: "#1c4fa1", zoom: { value: BOARD_Z }, penMode: true } }}
           UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, export: false, saveAsImage: false, clearCanvas: false, toggleTheme: false, changeViewBackgroundColor: false } }}>
           <MainMenu><MainMenu.DefaultItems.Help /></MainMenu>
         </Excalidraw>
         <div className="sheen" aria-hidden="true" />
-        {(() => { const pid = selectedPid || focusPid; const p = pid && d.board?.projects[pid]; return p && panel?.pid !== pid ? (
-          <button className="open-card" onClick={() => { setPanel({ type: "project", pid }); focus(pid, sheetPeekPx()); }}>✏️ details &amp; edit: {p.name.replace(/^DEMO · /, "")}</button>) : null; })()}
+        {loupe && <Loupe pos={loupe} setPos={setLoupe} onClose={() => setLoupe(null)} size={window.innerWidth < 700 ? 200 : 260} />}
+        {/* details open by tapping a project on the board or its magnet; nothing floats over the writing */}
       </main>
       </div>
       <nav className="tray" aria-label="Board tools">
-        <button className="marker black" onClick={() => { overview(); setFocusPid(null); }} title="Zoom out to the whole operation"><span>all</span></button>
-        <button className={"marker purple" + (drawMode ? " on" : "")} onClick={() => setDrawMode((m) => !m)} aria-pressed={drawMode} title={drawMode ? "Hide drawing tools" : "Draw on the board"}><span>{drawMode ? "✓ done" : "✎ draw"}</span></button>
-        <button className="marker blue" onClick={newProject} title="New project"><span>+ new</span></button>
-        <details className="menu"><summary className="marker green" title="Snapshot / export"><span>save</span></summary>
+        <button className="marker black" onClick={() => { overview(); setFocusPid(null); }} title="Back to the middle of the board"><span>home</span></button>
+        <button className={"marker orange" + (loupe ? " on" : "")} aria-pressed={!!loupe} onClick={() => setLoupe((l) => (l ? null : { x: canvasRef.current.clientWidth / 2, y: canvasRef.current.clientHeight * 0.4 }))} title="Magnifier: drag it over the board; write in it with a pen"><span>🔍 lens</span></button>
+        <button className={"marker purple" + (drawMode ? " on" : "")} onClick={() => setDrawMode((m) => !m)} aria-pressed={drawMode} title={drawMode ? "Hide the drawing toolbar" : "Show the drawing toolbar (eraser, colours, select)"}><span>{drawMode ? "✓ tools" : "✎ tools"}</span></button>
+        <details className="menu"><summary className="marker green" title="New project, snapshots, history"><span>more ▴</span></summary>
           <div className="menu-pop">
-            <button onClick={() => snapshot("html")}>Readable snapshot (.html)</button>
-            <button onClick={() => snapshot("print")}>Printable view</button>
-            <button onClick={() => snapshot("png")}>Board picture (.png)</button>
-            <p className="fine">Files go to this device. Drive copies are made from the Mac with <code>board export --drive</code>, which checks the file arrived.</p>
+            <button onClick={(e) => { e.currentTarget.closest("details").open = false; newProject(); }}>＋ New project</button>
+            <button onClick={(e) => { e.currentTarget.closest("details").open = false; setPanel({ type: "history" }); }}>↺ History and restore</button>
+            <button onClick={() => snapshot("html")}>⇩ Readable snapshot (.html)</button>
+            <button onClick={() => snapshot("print")}>🖨 Printable view</button>
+            <button onClick={() => snapshot("png")}>🖼 Board picture (.png)</button>
+            <p className="fine">Snapshots go to this device. Drive copies are made from the Mac with <code>board export --drive</code>, which checks the file arrived.</p>
           </div></details>
-        <button className="marker red" onClick={() => setPanel({ type: "history" })} title="History and restore"><span>history</span></button>
       </nav>
       {panel?.type === "project" && d.board?.projects[panel.pid] && <ProjectPanel p={d.board.projects[panel.pid]} all={d.board.projects} log={d.board.log} doOp={doOp} onClose={() => setPanel(null)} onFocus={() => focus(panel.pid)} />}
       {panel?.type === "history" && <HistoryPanel store={conn.store} log={d.board?.log || []} onRestore={restoreVersion} onClose={() => setPanel(null)} />}
