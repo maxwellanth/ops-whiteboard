@@ -7,7 +7,10 @@ import { sortedProjects, statusView, ago } from "./model.js";
 
 const FONT = FONT_FAMILY.Excalifont;
 const LH = 1.25; // Excalifont line height
-const W = 420; // writing width of a cluster
+const W = 420; // used for default spacing
+const CW = 360; // core card width
+const SW = 190, SH = 88; // sticky note size
+const NOTE = { next: { fill: "#fff3a6", edge: "#e8c84a" }, decision: { fill: "#ffd8a8", edge: "#f08c00" }, blocker: { fill: "#ffc9c9", edge: "#f08080" } };
 // Dry-erase marker colours
 const INK = { black: "#1e1e1e", blue: "#1c4fa1", green: "#237a3b", red: "#c92a2a", orange: "#d9480f", purple: "#6741d9", faded: "#9aa0a6" };
 const TONE = { live: INK.green, stale: INK.orange, reported: INK.blue, unknown: INK.faded };
@@ -45,7 +48,7 @@ function rng(seedStr) {
 
 /** Default spot for a cluster with no saved position: paid work on the inner ring, everything else further out. */
 function defaultPos(p, i, n, ring) {
-  const r = ring === 0 ? 800 : 1300;
+  const r = ring === 0 ? 1050 : 1750;
   const a = -Math.PI / 2 + (2 * Math.PI * (i + (ring ? 0.5 : 0))) / Math.max(n, 1);
   return { x: Math.round(Math.cos(a) * r - W / 2), y: Math.round(Math.sin(a) * r - 220) };
 }
@@ -124,89 +127,100 @@ export function buildManaged(board, now = Date.now()) {
     const r = rng(p.id);
     const g = [`g:${p.id}`];
     const put = (s, role) => add({ ...s, groupIds: g }, p.id, role);
-    const tilt = () => (r() - 0.5) * 0.03;
-    const x0 = pos.x + 24;
-    let y = pos.y + 22;
-    const text = (id, str, fontSize, color = INK.black, extra = {}, indent = 0, width = W - indent) => {
-      const lines = wrap(str, fontSize, width);
+    const tilt = () => (r() - 0.5) * 0.025;
+    const x0 = pos.x + 20;
+    let y = pos.y + 16;
+    const text = (id, str, fontSize, color = INK.black, extra = {}, indent = 0, maxLines = 99) => {
+      let lines = wrap(str, fontSize, CW - 40 - indent);
+      if (lines.length > maxLines) { lines = lines.slice(0, maxLines); lines[maxLines - 1] = lines[maxLines - 1].replace(/.{0,2}$/, "…"); }
       put({ ...scrawl(x0 + indent, y, lines.join("\n"), fontSize, color, extra), id: `m:${p.id}:${id}`, angle: tilt() }, id);
       y += lines.length * fontSize * LH + 4;
-      return lines.length;
     };
-    const head = (id, label, color) => { y += 8; text(id, label, 17, color); };
 
-    // Title row: doodle, big marker title, wobbly underline, star for P1
-    DOODLE[p.revenue]?.(x0, y).forEach((s) => put(s, "doodle"));
+    // ---------- core card: what it is, what's happening now, who owns it ----------
+    text("tag", `${lane.label}${p.client ? " · " + p.client : ""} · P${p.priority}`, 15, lane.ink);
+    DOODLE[p.revenue]?.(x0, y + 2).forEach((s) => put(s, "doodle"));
     const tStart = y;
-    y += 2;
-    const tl = wrap(p.name, 32, W - 64);
-    put({ ...scrawl(x0 + 60, y, tl.join("\n"), 32, lane.ink === INK.faded ? INK.black : lane.ink), id: `m:${p.id}:title`, angle: tilt() }, "title");
-    y += tl.length * 32 * LH;
-    put(DOODLE.underline(x0 + 58, y + 2, Math.min(W - 70, Math.max(...tl.map((l) => l.length)) * 16), lane.ink, r), "doodle");
-    if (p.priority === 1) DOODLE.star(x0 + W - 12, tStart + 12, lane.ink).forEach((s) => put(s, "doodle"));
-    y = Math.max(y + 12, tStart + 56);
-    text("tag", `${lane.label}${p.client ? " · " + p.client : ""} · P${p.priority}`, 16, lane.ink);
-    if (p.demo) put({ ...scrawl(x0 + W - 120, pos.y - 14, "DEMO\n(fake data)", 18, INK.orange), id: `m:${p.id}:demo`, angle: 0.12 }, "demo");
+    const tl = wrap(p.name.replace(/^DEMO · /, ""), 28, CW - 100);
+    put({ ...scrawl(x0 + 58, y + 4, tl.join("\n"), 28, lane.ink === INK.faded ? INK.black : lane.ink), id: `m:${p.id}:title`, angle: tilt() }, "title");
+    y += 4 + tl.length * 28 * LH;
+    put(DOODLE.underline(x0 + 56, y + 2, Math.min(CW - 90, Math.max(...tl.map((l) => l.length)) * 14), lane.ink, r), "doodle");
+    if (p.priority === 1) DOODLE.star(pos.x + CW - 22, tStart + 18, lane.ink).forEach((s) => put(s, "doodle"));
+    y = Math.max(y + 14, tStart + 58);
+    if (p.demo) put({ ...scrawl(pos.x + CW - 100, pos.y - 34, "DEMO\n(fake data)", 17, INK.orange), id: `m:${p.id}:demo`, angle: 0.12 }, "demo");
 
-    head("h-goal", "goal:", INK.blue); text("goal", p.goal || "(not set)", 19, p.goal ? INK.black : INK.faded, {}, 14);
-    head("h-now", "NOW ⟶", INK.black); text("now", p.currentStep || "(not set)", 22, p.currentStep ? INK.black : INK.faded, {}, 14);
+    // Status, ClickUp-style but in marker: a boxed NOW line that's readable at a glance
+    const nowLines = wrap("NOW: " + (p.currentStep || "(not set)"), 19, CW - 70);
+    const nowH = nowLines.length * 19 * LH + 18;
+    put({ id: `m:${p.id}:nowbox`, type: "rectangle", x: x0 - 4, y, width: CW - 32, height: nowH, strokeColor: lane.ink, backgroundColor: "transparent", strokeWidth: 2, roughness: 2, angle: tilt() }, "now");
+    put({ ...scrawl(x0 + 8, y + 9, nowLines.join("\n"), 19, p.currentStep ? INK.black : INK.faded), id: `m:${p.id}:now` }, "now");
+    y += nowH + 10;
+    text("goal", "goal: " + (p.goal || "(not set)"), 15, p.goal ? INK.blue : INK.faded, {}, 0, 2);
 
-    head("h-agents", "who's on it:", INK.blue);
-    if (!p.agents.length) text("ag-none", "nobody assigned", 17, INK.faded, {}, 14);
+    y += 4;
+    if (!p.agents.length) text("ag-none", "nobody assigned", 16, INK.faded);
     p.agents.forEach((a, k) => {
       const v = statusView(a.status, now);
       const ai = /claude|codex|gpt|agent|bot/i.test(a.name);
-      (ai ? DOODLE.robot : DOODLE.person)(x0 + 10, y + 4, TONE[v.tone]).forEach((s) => put(s, "doodle"));
-      text(`ag${k}`, `${a.name}: ${a.owns || "?"}`, 18, INK.black, {}, 40);
-      text(`ags${k}`, `${v.tone === "live" ? "● " : v.tone === "unknown" ? "? " : "○ "}${v.label}${v.detail ? " · " + v.detail : ""}`, 15, TONE[v.tone], {}, 40);
+      (ai ? DOODLE.robot : DOODLE.person)(x0 + 2, y + 6, TONE[v.tone]).forEach((s) => put(s, "doodle"));
+      text(`ag${k}`, `${a.name}: ${a.owns || "?"}`, 16, INK.black, {}, 32, 2);
+      text(`ags${k}`, `${v.tone === "live" ? "● " : v.tone === "unknown" ? "? " : "○ "}${v.label}`, 13, TONE[v.tone], {}, 32, 1);
     });
-    if (p.blockers.length) {
-      y += 8; DOODLE.wall(x0, y).forEach((s) => put(s, "doodle"));
-      const yy = y; text("h-blk", "STUCK ON:", 18, INK.red, {}, 44); y = Math.max(y, yy + 28);
-      p.blockers.slice(0, 4).forEach((b, k) => text(`blk${k}`, "✕ " + b.text, 17, INK.red, {}, 14));
-    }
-    if (p.next.length) { head("h-next", "next:", INK.black); p.next.slice(0, 4).forEach((b, k) => text(`nx${k}`, "☐ " + b.text, 17, INK.black, {}, 14)); if (p.next.length > 4) text("nx-more", `+${p.next.length - 4} more`, 15, INK.faded, {}, 14); }
-    if (p.done.length) { head("h-done", `done (${p.done.length}):`, INK.green); p.done.slice(-3).forEach((b, k) => text(`dn${k}`, "✓ " + b.text, 16, INK.green, {}, 14)); }
-    if (p.links.length) y += 10; // room for the link icon
-    p.links.slice(0, 4).forEach((l, k) => text(`ln${k}`, "↗ " + l.text, 17, INK.blue, { link: l.url }, 14));
-    if (p.conflicts.length) text("cf", `⚠ ${p.conflicts.length} conflicting edit(s) kept: tap to review`, 15, INK.orange);
-    text("foot", `last update ${ago(p.updatedAt, now)} by ${p.updatedBy}`, 14, INK.faded);
-    const h = y - pos.y + 14;
-
-    // Cluster outline: an invisible box (anchor for arrows and dragging) plus a loose, wobbly
-    // marker loop drawn around the writing, the way you'd circle a group of notes on a whiteboard.
-    sk.splice(sk.findIndex((s) => meta.get(s.id)?.pid === p.id), 0, { id: `m:${p.id}:card`, type: "rectangle", x: pos.x, y: pos.y, width: W + 40, height: h,
-      strokeColor: "transparent", backgroundColor: "transparent", strokeWidth: 1, roughness: 0, opacity: 0, groupIds: g });
-    {
-      const cx = W / 2 + 20, cy = h / 2, rx = W / 2 + 34, ry = h / 2 + 22, pts = [];
-      const start = r() * Math.PI * 2, n = 22;
-      for (let k = 0; k <= n + 1; k++) { // runs slightly past the start, like a real pen stroke
-        const a = start + (k / n) * Math.PI * 2, j = 1 + (r() - 0.5) * 0.05;
-        const sx = Math.cos(a), sy = Math.sin(a);
-        const px = Math.sign(sx) * Math.pow(Math.abs(sx), 0.55) * rx * j, py = Math.sign(sy) * Math.pow(Math.abs(sy), 0.55) * ry * j; // squarish ellipse
-        pts.push([Math.round(cx + px), Math.round(cy + py)]);
-      }
-      put({ ...line(pos.x, pos.y, pts.map(([a, b]) => [a - pts[0][0], b - pts[0][1]]), lane.ink, lane.ring, { roughness: 1, strokeStyle: p.revenue === "internal" ? "dashed" : "solid" }), x: pos.x + pts[0][0], y: pos.y + pts[0][1], id: `m:${p.id}:loop` }, "loop");
-    }
+    if (p.conflicts.length) text("cf", `⚠ ${p.conflicts.length} conflicting edit(s) kept`, 14, INK.orange);
+    text("foot", `updated ${ago(p.updatedAt, now)} by ${p.updatedBy}`, 13, INK.faded);
+    const h = y - pos.y + 10;
+    // The card goes first so it sits beneath its writing. Marker outline only, no fill: it's a whiteboard.
+    sk.splice(sk.findIndex((s) => meta.get(s.id)?.pid === p.id), 0, { id: `m:${p.id}:card`, type: "rectangle", x: pos.x, y: pos.y, width: CW, height: h,
+      strokeColor: lane.ink, backgroundColor: "transparent", strokeWidth: lane.ring, roughness: 2, roundness: { type: 3 }, strokeStyle: p.revenue === "internal" ? "dashed" : "solid", groupIds: g, angle: (r() - 0.5) * 0.01 });
     meta.set(`m:${p.id}:card`, { managed: true, pid: p.id, role: "card" });
 
-    // Decisions: written beside the cluster in red, boxed, with a stick figure "you?"
+    // ---------- islands of sticky notes around the card (Miro-style spatial grouping) ----------
+    const sticky = (id, str, color, sx, sy, role) => {
+      let ls = wrap(str, 16, SW - 22);
+      if (ls.length > 3) { ls = ls.slice(0, 3); ls[2] = ls[2].replace(/.{0,2}$/, "…"); }
+      put({ id: `m:${p.id}:${id}`, type: "rectangle", x: sx, y: sy, width: SW, height: SH, angle: (r() - 0.5) * 0.08, strokeColor: color.edge, backgroundColor: color.fill, fillStyle: "solid", strokeWidth: 1, roughness: 1,
+        label: { text: ls.join("\n"), fontSize: 16, fontFamily: FONT, strokeColor: INK.black } }, role);
+    };
+    const link = (fromY, toX, toY, color) => { // marker arrow from the card's right edge to an island
+      const sx = pos.x + CW + 6, sy = Math.min(pos.y + h - 10, Math.max(pos.y + 10, fromY));
+      add({ type: "arrow", x: sx, y: sy, points: [[0, 0], [(toX - sx) * 0.5, (toY - sy) * 0.35 - 8], [toX - sx, toY - sy]], roundness: { type: 2 }, strokeColor: color, strokeWidth: 2, roughness: 2, groupIds: g,
+        start: { id: `m:${p.id}:card` } }, p.id, "isl");
+    };
+    const colX = pos.x + CW + 90;
+    let colY = pos.y - 6;
     if (p.decisions.length) {
-      const dx = pos.x + W + 64, dy = pos.y + 40;
-      DOODLE.you(dx, dy).forEach((s) => put(s, "doodle"));
-      let yy = dy + 72;
-      put({ ...scrawl(dx, yy, "MAX, DECIDE:", 20, INK.red), id: `m:${p.id}:dec-h` }, "dec");
-      yy += 28;
-      p.decisions.slice(0, 3).forEach((d, k) => {
-        const ls = wrap("→ " + d.text, 17, 230);
-        put({ ...scrawl(dx + 4, yy, ls.join("\n"), 17, INK.red), id: `m:${p.id}:dec${k}` }, "dec");
-        yy += ls.length * 17 * LH + 6;
-      });
-      put({ id: `m:${p.id}:dec`, type: "rectangle", x: dx - 12, y: dy + 64, width: 262, height: yy - dy - 56, strokeColor: INK.red, backgroundColor: "transparent", strokeWidth: 2, roughness: 2, angle: -0.03 }, "dec");
+      DOODLE.you(colX, colY + 6).forEach((s) => put(s, "doodle"));
+      put({ ...scrawl(colX + 56, colY + 16, "MAX, DECIDE", 21, INK.red), id: `m:${p.id}:dec-h` }, "dec");
+      link(pos.y + 40, colX - 10, colY + 30, INK.red);
+      colY += 70;
+      p.decisions.slice(0, 3).forEach((d, k) => { sticky(`dec${k}`, "? " + d.text, NOTE.decision, colX + (k % 2) * 16, colY, "dec"); colY += SH + 12; });
+      colY += 14;
     }
+    if (p.next.length) {
+      put({ ...scrawl(colX, colY, `next (${p.next.length})`, 20, INK.black), id: `m:${p.id}:nx-h` }, "next");
+      link(colY + 12, colX - 10, colY + 12, INK.black);
+      colY += 32;
+      p.next.slice(0, 3).forEach((n, k) => { sticky(`nx${k}`, n.text, NOTE.next, colX + ((k + 1) % 2) * 14, colY, "next"); colY += SH + 12; });
+      if (p.next.length > 3) put({ ...scrawl(colX, colY, `+${p.next.length - 3} more`, 15, INK.faded), id: `m:${p.id}:nx-more` }, "next");
+    }
+    // Under the card: roadblocks (pink notes behind a brick wall), then done ticks and links
+    let by = pos.y + h + 30;
+    if (p.blockers.length) {
+      DOODLE.wall(pos.x + 6, by).forEach((s) => put(s, "doodle"));
+      put({ ...scrawl(pos.x + 50, by, "STUCK ON", 20, INK.red), id: `m:${p.id}:blk-h` }, "blk");
+      by += 34;
+      p.blockers.slice(0, 2).forEach((b, k) => sticky(`blk${k}`, "✕ " + b.text, NOTE.blocker, pos.x + k * (SW + 14), by, "blk"));
+      by += SH + 22;
+    }
+    if (p.done.length) {
+      put({ ...scrawl(pos.x + 6, by, `done (${p.done.length}):`, 17, INK.green), id: `m:${p.id}:dn-h` }, "done");
+      by += 24;
+      p.done.slice(-3).forEach((d, k) => { const ls = wrap("✓ " + d.text, 15, CW + 120).slice(0, 1); put({ ...scrawl(pos.x + 16, by, ls.join(""), 15, INK.green), id: `m:${p.id}:dn${k}` }, "done"); by += 22; });
+    }
+    p.links.slice(0, 2).forEach((l, k) => { by += k ? 2 : 10; put({ ...scrawl(pos.x + 16, by, "↗ " + wrap(l.text, 16, CW).slice(0, 1).join(""), 16, INK.blue, { link: l.url }), id: `m:${p.id}:ln${k}` }, "link"); by += 26; });
 
     // Web: hub → project (thick marker for paid), plus dashed lines between related projects
-    geom[p.id] = { x: pos.x, y: pos.y, w: W + 40, h };
+    geom[p.id] = { x: pos.x, y: pos.y, w: CW, h };
     const [s0, e0] = segment({ cx: 0, cy: 0, rx: 260, ry: 125, ellipse: true }, rectOf(geom[p.id]));
     add({ id: `m:${p.id}:hub`, type: "arrow", x: s0[0], y: s0[1], points: [[0, 0], [e0[0] - s0[0], e0[1] - s0[1]]], strokeColor: lane.ink, strokeWidth: p.revenue === "paid" ? 4 : 2, roughness: 2, strokeStyle: p.revenue === "internal" ? "dashed" : "solid",
       start: { id: "m:hq" }, end: { id: `m:${p.id}:card` } }, p.id, "hub");

@@ -4,6 +4,8 @@
 import { createStore } from "./ghstore.js";
 
 const K = { token: "ow.token", repo: "ow.repo" };
+// Where the board lives. The repo itself is private: knowing its name gives no access.
+export const DEFAULT_REPO = "maxwellanth/ops-board-data";
 const get = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 const set = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} };
 
@@ -20,7 +22,7 @@ export async function detectConnection() {
   const hash = new URLSearchParams(location.hash.slice(1));
   if (hash.get("repo") && !get(K.repo)) set(K.repo, hash.get("repo"));
   const token = get(K.token), repo = get(K.repo);
-  if (!token || !repo) return { mode: "setup", repo: repo || hash.get("repo") || "" };
+  if (!token || !repo) return { mode: "setup", repo: repo || hash.get("repo") || DEFAULT_REPO };
   return { mode: "token", repo, path: "board.json", store: createStore({ token, repo, path: "board.json" }) };
 }
 

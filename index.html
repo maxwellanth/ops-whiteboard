@@ -2,20 +2,24 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="robots" content="noindex, nofollow" />
-    <meta name="theme-color" content="#fdfcf8" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="description" content="Private hand-drawn project whiteboard." />
+    <meta name="theme-color" content="#1f3a5f" />
     <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="Ops Board" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="application-name" content="Ops Board" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+    <link rel="icon" href="./favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <title>Ops Whiteboard</title>
+    <style>html,body{margin:0;height:100%;background:#1f3a5f}</style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><div class="splash" style="display:grid;place-items:center;height:100dvh;color:#fff;font:16px system-ui">Opening the whiteboard…</div></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

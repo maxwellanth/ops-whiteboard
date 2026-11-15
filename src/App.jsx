@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Excalidraw, CaptureUpdateAction, exportToSvg, exportToBlob, MainMenu } from "@excalidraw/excalidraw";
+import { Excalidraw, CaptureUpdateAction, exportToSvg, exportToBlob, MainMenu, viewportCoordsToSceneCoords, getCommonBounds } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
 import { applyOp, mergeBoards, normalizeBoard, sortedProjects, snapshotHtml, statusView, ago, uid } from "./model.js";
 import { buildManaged, isManaged } from "./scene.js";
@@ -11,8 +11,8 @@ const clone = (x) => JSON.parse(JSON.stringify(x));
 const draftKey = (repo) => "ow.draft." + repo;
 const elSig = (els) => els.reduce((s, e) => s + e.version * 31 + (e.isDeleted ? 7 : 1), els.length);
 
-export default function App() {
-  const [conn, setConn] = useState(null);
+export default function App({ initialConn }) {
+  const [conn, setConn] = useState(initialConn);
   const [api, setApi] = useState(null);
   const [, force] = useState(0);
   const rerenderUi = () => force((n) => n + 1);
@@ -21,6 +21,10 @@ export default function App() {
   const [panel, setPanel] = useState(null); // {type:'project', pid} | {type:'history'} | {type:'settings'}
   const [selectedPid, setSelectedPid] = useState(null);
   const [focusPid, setFocusPid] = useState(null); // last project zoomed to from a magnet
+  // Phones open in "look" mode: no drawing toolbar over the board; pan/zoom with fingers, tap a project to read it.
+  // The "draw" marker in the tray switches the full Excalidraw toolset on. Wide screens start in draw mode.
+  const [drawMode, setDrawMode] = useState(() => window.innerWidth >= 700);
+  const tapRef = useRef(null);
   const doc = useRef({ board: null, base: null, sha: null, commit: null, fetchedAt: null, rev: 0, savedRev: 0, msgs: [], pushing: false, generated: new Map(), manualSig: 0 });
   const timers = useRef({});
 
@@ -41,6 +45,7 @@ export default function App() {
 
   const updatePill = useCallback(() => {
     const d = doc.current;
+    if (d.offline && d.cachedFrom && d.rev === d.savedRev) return setPill({ kind: "offline", text: `Offline · copy from ${ago(d.cachedFrom)}, may be out of date` });
     if (d.offline) return setPill({ kind: "offline", text: `Can't reach GitHub · edits kept on this device only (${ago(d.offline)})` });
     if (d.rev !== d.savedRev) return setPill({ kind: "local", text: d.pushing ? "Saving to GitHub…" : "Unsynced · saved on this device only" });
     setPill({ kind: "synced", text: `Saved in GitHub ${d.commit ? "· " + d.commit.slice(0, 7) : ""} · checked ${d.fetchedAt ? new Date(d.fetchedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "-"}` });
@@ -94,14 +99,14 @@ export default function App() {
   }, [render, markDirty, showToast]);
 
   // ---------- load ----------
-  useEffect(() => { detectConnection().then(setConn); }, []);
 
   const load = useCallback(async (initial) => {
     const d = doc.current;
     try {
       const remote = await conn.store.load();
       if (!remote.board) { setPill({ kind: "error", text: "No board.json in the repo yet. Run `board init` on the Mac." }); return; }
-      d.fetchedAt = remote.fetchedAt; d.offline = null;
+      d.fetchedAt = remote.fetchedAt; d.offline = null; d.cachedFrom = null;
+      try { localStorage.setItem("ow.cache." + conn.repo, JSON.stringify({ board: remote.board, sha: remote.sha, fetchedAt: remote.fetchedAt })); } catch {}
       if (initial) {
         let draft = null; try { draft = JSON.parse(localStorage.getItem(draftKey(conn.repo)) || "null"); } catch {}
         d.base = normalizeBoard(remote.board); d.sha = remote.sha; d.board = clone(d.base);
@@ -112,7 +117,7 @@ export default function App() {
           setTimeout(push, 500);
         }
         render();
-        setTimeout(() => api?.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.8 }), 60);
+        setTimeout(() => api?.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.95 }), 60);
       } else if (remote.sha !== d.sha) {
         if (d.rev === d.savedRev && !d.pushing) { d.base = normalizeBoard(remote.board); d.board = clone(d.base); d.sha = remote.sha; d.commit = null; render(); showToast(`Board updated: ${d.board.log[0]?.by || "someone"}: ${d.board.log[0]?.msg || ""}`, "info", 5000); }
         else push();
@@ -123,7 +128,9 @@ export default function App() {
       d.offline = d.offline || new Date().toISOString(); updatePill();
       if (initial) {
         let draft = null; try { draft = JSON.parse(localStorage.getItem(draftKey(conn.repo)) || "null"); } catch {}
+        let cache = null; try { cache = JSON.parse(localStorage.getItem("ow.cache." + conn.repo) || "null"); } catch {}
         if (draft?.board) { d.board = normalizeBoard(draft.board); d.base = draft.base; d.sha = draft.sha; d.rev = 1; render(); showToast("Offline: showing the copy saved on this device. It is not confirmed in GitHub.", "warn", 10000); }
+        else if (cache?.board) { d.board = normalizeBoard(cache.board); d.base = clone(d.board); d.sha = cache.sha; d.cachedFrom = cache.fetchedAt; render(); updatePill(); showToast(`Offline: showing the last copy this device downloaded (${ago(cache.fetchedAt)}). It may be out of date.`, "warn", 10000); }
       }
     }
   }, [api, conn, push, render, showToast, updatePill]);
@@ -177,11 +184,34 @@ export default function App() {
     setSelectedPid((cur) => (cur === pid ? cur : pid));
   }, [api, markDirty, render, showToast]);
 
-  // ---------- navigation and export ----------
-  const focus = (pid) => {
-    const els = api.getSceneElements().filter((e) => e.customData?.pid === pid && e.customData.role !== "hub" && e.customData.role !== "rel");
-    if (els.length) api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: 0.85, animate: true, duration: 450 });
+  // ---------- tap a project island to open its details (works in look and draw mode) ----------
+  const onCanvasPointerDown = (e) => { if (e.isPrimary) tapRef.current = { x: e.clientX, y: e.clientY, t: Date.now() }; };
+  const onCanvasPointerUp = (e) => {
+    const t = tapRef.current; tapRef.current = null;
+    if (!t || !api || !e.isPrimary || Math.hypot(e.clientX - t.x, e.clientY - t.y) > 8 || Date.now() - t.t > 450) return;
+    if (drawMode && api.getAppState().activeTool.type !== "selection") return; // don't hijack a drawing tool
+    const st = api.getAppState();
+    const { x, y } = viewportCoordsToSceneCoords({ clientX: e.clientX, clientY: e.clientY }, st);
+    const byPid = {};
+    for (const el of api.getSceneElements()) { const pid = el.customData?.pid; if (pid && pid !== "_hq" && pid !== "_" && el.customData.role !== "hub" && el.customData.role !== "rel") (byPid[pid] ||= []).push(el); }
+    for (const [pid, els] of Object.entries(byPid)) {
+      const [x1, y1, x2, y2] = getCommonBounds(els);
+      if (x >= x1 && x <= x2 && y >= y1 && y <= y2 && doc.current.board?.projects[pid]) { setFocusPid(pid); setPanel({ type: "project", pid }); focus(pid, sheetPeekPx()); return; }
+    }
   };
+
+  // ---------- navigation and export ----------
+  // Zoom to one project island. On phones, when the details sheet covers the bottom, fit the island into the visible top part.
+  const focus = (pid, sheetPx = 0) => {
+    const els = api.getSceneElements().filter((e) => e.customData?.pid === pid && e.customData.role !== "hub" && e.customData.role !== "rel");
+    if (!els.length) return;
+    if (!sheetPx) return api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: 0.88, animate: true, duration: 450 });
+    const vh = api.getAppState().height;
+    api.scrollToContent(els, { fitToViewport: true, viewportZoomFactor: Math.max(0.3, (vh - sheetPx) / vh) * 0.92 });
+    const st = api.getAppState();
+    api.updateScene({ appState: { scrollY: st.scrollY - sheetPx / 2 / st.zoom.value }, captureUpdate: CaptureUpdateAction.NEVER });
+  };
+  const sheetPeekPx = () => (window.innerWidth < 700 ? Math.round(window.innerHeight * 0.46) : 0);
   const overview = () => api.scrollToContent(undefined, { fitToViewport: true, viewportZoomFactor: 0.92, animate: true, duration: 450 });
 
   const download = (blob, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000); };
@@ -225,10 +255,11 @@ export default function App() {
       <header className="topline">
         <div className="brand" onClick={overview} title="Zoom out to the whole operation">Ops Whiteboard</div>
         <div className={"pill " + pill.kind} title={pill.text}>{pill.text}</div>
+        <button className="gear" onClick={() => setPanel({ type: "settings" })} aria-label="Connection and privacy" title="Connection and privacy">⚙</button>
       </header>
       <div className="chips" aria-label="Projects">
         {projects.map((p) => (
-          <button key={p.id} className={"chip " + p.revenue + (selectedPid === p.id ? " on" : "")} onClick={() => { focus(p.id); setFocusPid(p.id); if (window.innerWidth >= 700) setPanel({ type: "project", pid: p.id }); else setPanel(null); }}>
+          <button key={p.id} className={"chip " + p.revenue + (selectedPid === p.id ? " on" : "")} onClick={() => { setFocusPid(p.id); setPanel({ type: "project", pid: p.id }); focus(p.id, sheetPeekPx()); }}>
             <i className="magnet" />{p.revenue === "paid" ? "$ " : ""}{p.name.replace(/^DEMO · /, "")}{p.demo ? " (demo)" : ""}
             {p.decisions.length ? <span className="badge dec">{p.decisions.length}?</span> : null}
             {p.blockers.length ? <span className="badge blk">{p.blockers.length}✕</span> : null}
@@ -237,19 +268,20 @@ export default function App() {
         ))}
       </div>
       <div className="board-frame">
-      <main className="canvas">
-        <Excalidraw excalidrawAPI={setApi} onChange={onChange} name="Ops Whiteboard" theme="light"
+      <main className={"canvas" + (drawMode ? " drawing" : " looking")} onPointerDownCapture={onCanvasPointerDown} onPointerUpCapture={onCanvasPointerUp}>
+        <Excalidraw excalidrawAPI={setApi} onChange={onChange} name="Ops Whiteboard" theme="light" viewModeEnabled={!drawMode}
           initialData={{ elements: [], appState: { viewBackgroundColor: "#ffffff", currentItemFontFamily: 5, currentItemRoughness: 2, currentItemStrokeWidth: 2, currentItemStrokeColor: "#1c4fa1" } }}
           UIOptions={{ canvasActions: { loadScene: false, saveToActiveFile: false, export: false, saveAsImage: false, clearCanvas: false, toggleTheme: false, changeViewBackgroundColor: false } }}>
           <MainMenu><MainMenu.DefaultItems.Help /></MainMenu>
         </Excalidraw>
         <div className="sheen" aria-hidden="true" />
         {(() => { const pid = selectedPid || focusPid; const p = pid && d.board?.projects[pid]; return p && panel?.pid !== pid ? (
-          <button className="open-card" onClick={() => setPanel({ type: "project", pid })}>✏️ details &amp; edit: {p.name.replace(/^DEMO · /, "")}</button>) : null; })()}
+          <button className="open-card" onClick={() => { setPanel({ type: "project", pid }); focus(pid, sheetPeekPx()); }}>✏️ details &amp; edit: {p.name.replace(/^DEMO · /, "")}</button>) : null; })()}
       </main>
       </div>
       <nav className="tray" aria-label="Board tools">
         <button className="marker black" onClick={() => { overview(); setFocusPid(null); }} title="Zoom out to the whole operation"><span>all</span></button>
+        <button className={"marker purple" + (drawMode ? " on" : "")} onClick={() => setDrawMode((m) => !m)} aria-pressed={drawMode} title={drawMode ? "Hide drawing tools" : "Draw on the board"}><span>{drawMode ? "✓ done" : "✎ draw"}</span></button>
         <button className="marker blue" onClick={newProject} title="New project"><span>+ new</span></button>
         <details className="menu"><summary className="marker green" title="Snapshot / export"><span>save</span></summary>
           <div className="menu-pop">
@@ -259,9 +291,8 @@ export default function App() {
             <p className="fine">Files go to this device. Drive copies are made from the Mac with <code>board export --drive</code>, which checks the file arrived.</p>
           </div></details>
         <button className="marker red" onClick={() => setPanel({ type: "history" })} title="History and restore"><span>history</span></button>
-        <button className="eraser" onClick={() => setPanel({ type: "settings" })} title="Connection and privacy"><span>⚙ access</span></button>
       </nav>
-      {panel?.type === "project" && d.board?.projects[panel.pid] && <ProjectPanel p={d.board.projects[panel.pid]} all={d.board.projects} doOp={doOp} onClose={() => setPanel(null)} onFocus={() => focus(panel.pid)} />}
+      {panel?.type === "project" && d.board?.projects[panel.pid] && <ProjectPanel p={d.board.projects[panel.pid]} all={d.board.projects} log={d.board.log} doOp={doOp} onClose={() => setPanel(null)} onFocus={() => focus(panel.pid)} />}
       {panel?.type === "history" && <HistoryPanel store={conn.store} log={d.board?.log || []} onRestore={restoreVersion} onClose={() => setPanel(null)} />}
       {panel?.type === "settings" && <SettingsPanel conn={conn} onClose={() => setPanel(null)} onForget={() => { forgetToken(); location.reload(); }} />}
       {toast && <div className={"toast " + toast.kind} onClick={() => setToast(null)}>{toast.text}</div>}
