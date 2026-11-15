@@ -149,6 +149,35 @@ export function applyOp(board, op, by) {
       msg = `deleted project ${op.pid}`;
       break;
     }
+    case "draw": {
+      const strokes = op.strokes || [];
+      if (!strokes.length) throw new Error("nothing to draw");
+      if (strokes.length > 200) throw new Error("at most 200 strokes per draw");
+      const made = strokes.map((st) => makeStroke(st.points || st, { at: op.at, color: st.color || op.color, width: st.width || op.width, by }));
+      // Give each stroke a valid Excalidraw order index after everything already on the board, so the app never has
+      // to re-number (and re-save) them. Fractional index: existing max key + "V" + two base-62 digits (never ending in 0).
+      const maxKey = board.scene.elements.map((e) => e.index).filter((k) => typeof k === "string").sort().at(-1);
+      const D = "123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+      const prefix = maxKey ? maxKey + "V" : "a0V";
+      made.forEach((e, i) => { e.index = prefix + D[Math.floor(i / D.length)] + D[i % D.length]; });
+      board.scene.elements = [...board.scene.elements, ...made];
+      op._ids = made.map((e) => e.id);
+      msg = `drew ${made.length} stroke(s)${op.note ? ": " + op.note.slice(0, 60) : ""} at ${Math.round(op.at?.[0] ?? 0)},${Math.round(op.at?.[1] ?? 0)}`;
+      break;
+    }
+    case "erase": {
+      // Agents may erase only their own strokes. Deleted strokes stay as tombstones and in git history.
+      let n = 0;
+      board.scene.elements = board.scene.elements.map((e) => {
+        if (!op.ids.includes(e.id) || e.isDeleted) return e;
+        if (e.customData?.drawnBy !== by) throw new Error(`stroke ${e.id} was drawn by ${e.customData?.drawnBy || "max"}, not ${by}; only its author can erase it here`);
+        n++;
+        return { ...e, isDeleted: true, version: e.version + 1, versionNonce: rnd32(), updated: Date.now() };
+      });
+      if (!n) throw new Error("no matching strokes");
+      msg = `erased ${n} of own stroke(s)`;
+      break;
+    }
     case "clearConflicts": {
       need(op.pid).conflicts = [];
       msg = `${op.pid}: cleared conflict notes`;
@@ -162,6 +191,51 @@ export function applyOp(board, op, by) {
   board.updatedBy = by;
   addLog(board, by, msg);
   return msg;
+}
+
+// ---------- freehand strokes drawn by agents (Claude, Codex) ----------
+// An agent draws the way a person does with a marker: it supplies its own sequence of points for each
+// stroke. These become ordinary Excalidraw freedraw elements: editable, erasable, saved with Max's pen marks.
+// Nothing here is a stock icon: the shape is exactly the points the agent wrote, with a slight hand wobble.
+export const MARKERS = { black: "#1e1e1e", blue: "#1c4fa1", green: "#237a3b", red: "#c92a2a", orange: "#d9480f", purple: "#6741d9" };
+const rnd32 = () => Math.floor(Math.random() * 2 ** 31);
+
+export function makeStroke(points, { at = [0, 0], color = "black", width = 4, by, wobble = 0.8, seed = rnd32() } = {}) {
+  if (!Array.isArray(points) || points.length < 2) throw new Error("each stroke needs at least 2 points, like [[0,0],[10,5]]");
+  for (const p of points) if (!Array.isArray(p) || p.length < 2 || !p.slice(0, 2).every(Number.isFinite)) throw new Error("points must be [x, y] number pairs");
+  // Densify (marker strokes are continuous) and add a small deterministic hand wobble
+  let r = seed || 1;
+  const noise = () => ((r = (r * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff - 0.5) * 2 * wobble;
+  const dense = [];
+  for (let i = 0; i < points.length; i++) {
+    const [x, y] = points[i];
+    if (i) {
+      const [px, py] = points[i - 1], n = Math.max(1, Math.floor(Math.hypot(x - px, y - py) / 6));
+      for (let k = 1; k < n; k++) dense.push([px + ((x - px) * k) / n + noise(), py + ((y - py) * k) / n + noise()]);
+    }
+    const mid = i && i < points.length - 1;
+    dense.push([x + (mid ? noise() : 0), y + (mid ? noise() : 0)]);
+  }
+  const ox = at[0] + dense[0][0], oy = at[1] + dense[0][1];
+  const rel = dense.map(([x, y]) => [Math.round((at[0] + x - ox) * 10) / 10, Math.round((at[1] + y - oy) * 10) / 10]);
+  const xs = rel.map((p) => p[0]), ys = rel.map((p) => p[1]);
+  const t = Date.now();
+  return {
+    id: uid("s"), type: "freedraw", x: ox, y: oy, width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys), angle: 0,
+    strokeColor: MARKERS[color] || (/^#[0-9a-f]{6}$/i.test(color) ? color : MARKERS.black), backgroundColor: "transparent", fillStyle: "solid",
+    strokeWidth: Math.max(1, Math.min(8, Number(width) || 4)), strokeStyle: "solid", roughness: 1, opacity: 100, groupIds: [], frameId: null, index: null,
+    roundness: null, seed: seed || rnd32(), version: 1, versionNonce: rnd32(), isDeleted: false, boundElements: null, updated: t, link: null, locked: false,
+    points: rel, pressures: [], simulatePressure: true, lastCommittedPoint: rel[rel.length - 1],
+    customData: { drawnBy: by, drawnAt: new Date(t).toISOString() },
+  };
+}
+
+/** Who made each kind of mark: freehand (Max's pen or an agent's strokes) vs writing generated from project data. */
+export function markSummary(board) {
+  const live = (board.scene?.elements || []).filter((e) => !e.isDeleted);
+  const by = {};
+  for (const e of live) { const k = e.customData?.drawnBy || "max (pen/finger)"; by[k] = (by[k] || 0) + 1; }
+  return { freehand: live.length, by };
 }
 
 // ---------- three-way merge (used when a save hits a newer remote version) ----------

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Excalidraw, CaptureUpdateAction, exportToSvg, exportToBlob, MainMenu, viewportCoordsToSceneCoords, getCommonBounds } from "@excalidraw/excalidraw";
 import "@excalidraw/excalidraw/index.css";
-import { applyOp, mergeBoards, normalizeBoard, sortedProjects, snapshotHtml, statusView, ago, uid } from "./model.js";
+import { applyOp, mergeBoards, normalizeBoard, sortedProjects, snapshotHtml, statusView, ago, uid, markSummary } from "./model.js";
 import { buildManaged, isManaged, CARD_PAD } from "./scene.js";
 import { ConflictError, AuthError } from "./ghstore.js";
 import { detectConnection, saveCredentials, forgetToken, tokenTemplateUrl } from "./connection.js";
@@ -26,6 +26,7 @@ export default function App({ initialConn }) {
   const [toast, setToast] = useState(null);
   const [panel, setPanel] = useState(null); // {type:'project', pid} | {type:'history'} | {type:'settings'}
   const [selectedPid, setSelectedPid] = useState(null);
+  const [author, setAuthor] = useState(null); // who drew the selected freehand mark
   const [focusPid, setFocusPid] = useState(null); // last project zoomed to from a magnet
   // Drawing is always on: a pen (e.g. S Pen) writes with the marker; fingers only pan and tap.
   // The "tools" marker shows Excalidraw's full toolbar (eraser, colours, select). Phones start with it hidden.
@@ -192,6 +193,10 @@ export default function App({ initialConn }) {
     const g = (appState.selectedGroupIds && Object.keys(appState.selectedGroupIds).find((k) => k.startsWith("g:"))) || null;
     const sel = Object.keys(appState.selectedElementIds || {}).map((id) => elements.find((e) => e.id === id)).find((e) => e && isManaged(e) && e.customData.pid !== "_hq");
     const pid = g ? g.slice(2) : sel?.customData?.pid || null;
+    const selIds = Object.keys(appState.selectedElementIds || {});
+    const one = selIds.length === 1 && elements.find((e) => e.id === selIds[0] && !isManaged(e));
+    const who = one ? `${one.type === "freedraw" ? "Drawn" : "Added"} by ${one.customData?.drawnBy ? one.customData.drawnBy[0].toUpperCase() + one.customData.drawnBy.slice(1) + " (agent, stroke by stroke)" : "Max"}` : null;
+    setAuthor((cur) => (cur === who ? cur : who));
     setSelectedPid((cur) => (cur === pid ? cur : pid));
   }, [api, markDirty, render, showToast]);
 
@@ -282,7 +287,7 @@ export default function App({ initialConn }) {
     <div className="shell">
       <header className="topline">
         <div className="brand" onClick={overview} title="Back to the middle of the board">Ops Whiteboard</div>
-        <div className={"pill " + pill.kind} title={pill.text}>{pill.text}</div>
+        <div className={"pill " + pill.kind} title={pill.text}>{author || pill.text}</div>
         <button className="gear" onClick={() => setPanel({ type: "settings" })} aria-label="Connection and privacy" title="Connection and privacy">⚙</button>
       </header>
       <div className="chips" aria-label="Projects">
@@ -323,7 +328,7 @@ export default function App({ initialConn }) {
       </nav>
       {panel?.type === "project" && d.board?.projects[panel.pid] && <ProjectPanel p={d.board.projects[panel.pid]} all={d.board.projects} log={d.board.log} doOp={doOp} onClose={() => setPanel(null)} onFocus={() => focus(panel.pid)} />}
       {panel?.type === "history" && <HistoryPanel store={conn.store} log={d.board?.log || []} onRestore={restoreVersion} onClose={() => setPanel(null)} />}
-      {panel?.type === "settings" && <SettingsPanel conn={conn} onClose={() => setPanel(null)} onForget={() => { forgetToken(); location.reload(); }} />}
+      {panel?.type === "settings" && <SettingsPanel conn={conn} marks={d.board ? markSummary(d.board) : null} onClose={() => setPanel(null)} onForget={() => { forgetToken(); location.reload(); }} />}
       {toast && <div className={"toast " + toast.kind} onClick={() => setToast(null)}>{toast.text}</div>}
     </div>
   );

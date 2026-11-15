@@ -178,13 +178,16 @@ export function HistoryPanel({ store, log, onRestore, onClose }) {
   );
 }
 
-export function SettingsPanel({ conn, onClose, onForget }) {
+export function SettingsPanel({ conn, marks, onClose, onForget }) {
   return (
     <Sheet title="Connection & privacy" onClose={onClose}>
       <p><b>Data:</b> <code>{conn.repo}</code> / board.json (private GitHub repo).</p>
       {conn.mode === "mac" ? <p><b>This device:</b> Mac mode. A local proxy on 127.0.0.1 uses the Mac's GitHub login, and no token is stored in this browser.</p>
         : <><p><b>This device:</b> uses a fine-grained GitHub token stored only in this browser. GitHub checks it on every read and write. Without it, this page shows no data.</p>
           <button className="danger" onClick={() => confirm("Remove the token from this device? You'll need to paste it again.") && onForget()}>Forget token on this device</button></>}
+      <h3>What's on the board</h3>
+      <p><b>Generated from project data:</b> each project's title, "now", "stuck", "you decide" and owner lines, their loops and the arrows. They are rebuilt from the project records, so edit them in the project sheet.</p>
+      <p><b>Freehand:</b> {marks ? `${marks.freehand} mark(s): ${Object.entries(marks.by).map(([k, v]) => `${v} by ${k}`).join(", ")}` : "…"}. Strokes by Claude or Codex are drawn point by point with the <code>board draw</code> command, not stamped from icons. All freehand marks are editable and erasable. Select one with the tools on to see who drew it.</p>
       <h3>What the status words mean</h3>
       <ul><li><span className="st live">LIVE</span> an agent sent evidence it is working within the last 10 minutes.</li>
         <li><span className="st reported">last reported</span> what someone said, with the time. It is not re-checked.</li>

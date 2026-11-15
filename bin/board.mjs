@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createStore, ConflictError } from "../src/ghstore.js";
-import { applyOp, normalizeBoard, sortedProjects, statusView, snapshotHtml, ago, emptyBoard } from "../src/model.js";
+import { applyOp, normalizeBoard, sortedProjects, statusView, snapshotHtml, ago, emptyBoard, markSummary, MARKERS } from "../src/model.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HELP = `board: shared Ops Whiteboard CLI (data: private GitHub repo, every write is a commit)
@@ -28,6 +28,13 @@ Write
   board agent <project> <agentName> --remove
   board new <project-id> --name "..." [--client "..."] [--revenue paid] [--priority 1] [--goal "..."]
   board restore <commitSha>                    copy an old version back as a new commit (nothing is lost)
+Freehand drawing (you draw it yourself, stroke by stroke, like a marker on the board)
+  board where                                  map of the board: project areas, freehand marks, free spots (scene units)
+  board draw --at X,Y [--color black|blue|green|red|orange|purple] [--width 2-8] [--note "what it is"] < strokes.json
+                                               strokes.json = [[[x,y],[x,y],...], {"points":[[x,y],...],"color":"red"}, ...]
+                                               points are relative to --at; ~1 unit = 1 board px (writing is 30-80 px tall)
+  board marks [--by claude]                    list freehand strokes and who drew them
+  board erase <strokeId...>                    erase your own strokes (they stay in git history)
 Export
   board export [--out DIR] [--drive]           readable HTML and Markdown snapshot; --drive copies to Google Drive and verifies it
 Setup
@@ -138,6 +145,55 @@ async function main() {
       for (const c of await store.history(Number(pos[1] || 20))) console.log(`${c.sha.slice(0, 7)}  ${new Date(c.date).toLocaleString()}  ${c.message.split("\n")[0]}`);
       return;
     }
+    case "where": {
+      const { board } = await store.load();
+      const b = normalizeBoard(board);
+      const boxes = [{ name: "THE OPERATION (hub)", x1: -500, y1: -260, x2: 500, y2: 260 }];
+      console.log("Board map (scene units; x grows right, y grows down; the hub is at 0,0). Board scale on a phone is 0.4, so 100 units ≈ 40 screen px.");
+      for (const p of sortedProjects(b)) {
+        const pos = p.pos || null;
+        if (pos) { boxes.push({ name: p.id, x1: pos.x - 60, y1: pos.y - 100, x2: pos.x + 830, y2: pos.y + 580 }); console.log(`  project ${p.id}: writing area about x ${pos.x - 60}..${pos.x + 830}, y ${pos.y - 100}..${pos.y + 580}`); }
+        else console.log(`  project ${p.id}: default layout position (not pinned); avoid a 900x700 area around it`);
+      }
+      const live = b.scene.elements.filter((e) => !e.isDeleted);
+      const groups = {};
+      for (const e of live) { const k = e.customData?.drawnBy || "max"; (groups[k] ||= []).push(e); }
+      for (const [k, els] of Object.entries(groups)) {
+        const x1 = Math.min(...els.map((e) => e.x + Math.min(0, ...e.points.map((q) => q[0])))), x2 = Math.max(...els.map((e) => e.x + Math.max(0, ...e.points.map((q) => q[0]))));
+        const y1 = Math.min(...els.map((e) => e.y + Math.min(0, ...e.points.map((q) => q[1])))), y2 = Math.max(...els.map((e) => e.y + Math.max(0, ...e.points.map((q) => q[1]))));
+        boxes.push({ name: k, x1, y1, x2, y2 });
+        console.log(`  freehand by ${k}: ${els.length} stroke(s) within x ${Math.round(x1)}..${Math.round(x2)}, y ${Math.round(y1)}..${Math.round(y2)}`);
+      }
+      const free = [];
+      for (let r = 700; r <= 2600 && free.length < 6; r += 300) for (let a = 0; a < 360 && free.length < 6; a += 30) {
+        const x = Math.round(Math.cos((a * Math.PI) / 180) * r), y = Math.round(Math.sin((a * Math.PI) / 180) * r * 0.75);
+        if (!boxes.some((bx) => x + 420 > bx.x1 && x - 20 < bx.x2 && y + 320 > bx.y1 && y - 20 < bx.y2)) free.push(`${x},${y}`);
+      }
+      console.log(`  free 400x300 spots (use as --at): ${free.join("  ") || "none found"}`);
+      console.log(`  marker colours: ${Object.keys(MARKERS).join(", ")}`);
+      return;
+    }
+    case "marks": {
+      const { board } = await store.load();
+      const b = normalizeBoard(board);
+      const s = markSummary(b);
+      console.log(`Freehand marks on the board: ${s.freehand} (${Object.entries(s.by).map(([k, v]) => `${v} by ${k}`).join(", ")}). Project writing, loops and arrows are generated from project data and are not counted.`);
+      for (const e of b.scene.elements.filter((e) => !e.isDeleted && (!flags.by || (e.customData?.drawnBy || "max") === flags.by)))
+        console.log(`  ${e.id}  ${(e.customData?.drawnBy || "max").padEnd(7)} ${e.type} at ${Math.round(e.x)},${Math.round(e.y)} ${Math.round(e.width)}x${Math.round(e.height)}${e.customData?.drawnAt ? "  " + ago(e.customData.drawnAt) : ""}`);
+      return;
+    }
+    case "draw": {
+      const by = who(flags);
+      if (!flags.at || flags.at === true) throw new Error("say where: --at X,Y (see: board where)");
+      const at = String(flags.at).split(",").map(Number);
+      if (at.length !== 2 || !at.every(Number.isFinite)) throw new Error("--at must be X,Y numbers");
+      const src = flags.file && flags.file !== true ? readFileSync(flags.file, "utf8") : readFileSync(0, "utf8");
+      let strokes;
+      try { strokes = JSON.parse(src); } catch { throw new Error("strokes must be JSON: [[[x,y],[x,y]], ...]"); }
+      if (!Array.isArray(strokes)) throw new Error("strokes must be a JSON array");
+      return mutate(store, { type: "draw", at, strokes, color: flags.color, width: flags.width, note: flags.note === true ? "" : flags.note }, by);
+    }
+    case "erase": return mutate(store, { type: "erase", ids: pos.slice(1) }, who(flags));
     case "set": return mutate(store, { type: "set", pid: pos[1], field: pos[2], value: pos.slice(3).join(" ") }, who(flags));
     case "add": return mutate(store, { type: "add", pid: pos[1], list: pos[2], text: pos.slice(3).join(" "), url: flags.url }, who(flags));
     case "resolve": return mutate(store, { type: "resolve", pid: pos[1], list: pos[2], item: pos[3], note: flags.note }, who(flags));

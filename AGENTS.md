@@ -19,6 +19,21 @@ board add <project> link "PR #12" --url https://github.com/... --as codex
 board resolve <project> next 1 --as codex           # moves next item 1 to done
 ```
 
+## Drawing on the board (freehand, like a marker)
+You can draw on the shared whiteboard yourself, stroke by stroke. Each stroke is a list of points
+you choose, saved as an editable freehand mark next to Max's S Pen marks.
+```bash
+board where                       # where projects, Max's marks and free space are
+echo '[[[0,0],[40,-30],[80,0]], {"points":[[10,20],[70,20]],"color":"red"}]' | board draw --at 900,700 --color blue --width 4 --note "smile" --as claude
+board marks --by claude           # your strokes and their ids
+board erase <strokeId> --as claude   # only your own strokes
+```
+- Draw original sketches with your own points: arrows, little characters, circles around things,
+  handwritten words made of strokes. Don't paste stock icons or repeat templates.
+- Keep it readable at board scale (writing 40 to 80 units tall) and leave white space.
+- Never draw over project writing or Max's marks. Use `board where` first.
+- Never erase or move Max's marks.
+
 ## Rules
 1. Report only what you actually did or observed. Never invent progress.
 2. Use `heartbeat` (LIVE) only with evidence you checked just now. It expires after 10 minutes.
