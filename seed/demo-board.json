@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "title": "Operations Whiteboard",
+  "updatedAt": "2026-11-14T22:00:00.000Z",
+  "updatedBy": "seed",
+  "projects": {
+    "demo-acme-site": {
+      "name": "DEMO · Acme Bakery website",
+      "client": "Acme Bakery (fictional)",
+      "revenue": "paid",
+      "priority": 1,
+      "demo": true,
+      "goal": "Launch a 5-page site with online pre-orders before the holiday rush",
+      "currentStep": "Building the pre-order form and checkout test mode",
+      "related": ["demo-invoice-flow"],
+      "agents": [
+        { "name": "Claude", "owns": "Front-end pages, pre-order form", "status": { "state": "reported", "note": "Home and Menu pages drafted (demo)", "checkedAt": "2026-11-14T21:40:00.000Z", "by": "seed" } },
+        { "name": "Codex", "owns": "Checkout integration, tests", "status": { "state": "unknown" } }
+      ],
+      "done": [{ "text": "Sitemap agreed (demo)", "at": "2026-11-12T18:00:00.000Z", "by": "seed" }],
+      "next": [{ "text": "Wire pre-order form to test checkout" }, { "text": "Send staging link to client" }],
+      "blockers": [{ "text": "Waiting on client's product photos (demo)" }],
+      "decisions": [{ "text": "Approve $40 deposit vs full prepay for pre-orders?" }],
+      "links": [{ "text": "Example link: staging site", "url": "https://example.com/" }]
+    },
+    "demo-invoice-flow": {
+      "name": "DEMO · Invoice follow-ups",
+      "client": "Your business (fictional)",
+      "revenue": "paid",
+      "priority": 2,
+      "demo": true,
+      "goal": "Get the 3 overdue demo invoices paid",
+      "currentStep": "Drafting reminder emails for review",
+      "agents": [{ "name": "Claude", "owns": "Reminder drafts", "status": { "state": "unknown" } }],
+      "done": [],
+      "next": [{ "text": "Review drafts before anything is sent" }],
+      "blockers": [],
+      "decisions": [{ "text": "OK to add a late fee line?" }],
+      "links": []
+    },
+    "demo-pitch-deck": {
+      "name": "DEMO · New client pitch",
+      "client": "Prospect (fictional)",
+      "revenue": "pipeline",
+      "priority": 2,
+      "demo": true,
+      "goal": "Win a website-refresh contract",
+      "currentStep": "Outline the pitch deck",
+      "agents": [{ "name": "Codex", "owns": "Competitor research", "status": { "state": "unknown" } }],
+      "done": [],
+      "next": [{ "text": "Collect 3 comparable sites" }],
+      "blockers": [],
+      "decisions": [],
+      "links": []
+    },
+    "demo-game-proto": {
+      "name": "DEMO · Side game prototype",
+      "client": "",
+      "revenue": "internal",
+      "priority": 4,
+      "demo": true,
+      "goal": "Playable vertical slice",
+      "currentStep": "Paused while client work is prioritised",
+      "agents": [],
+      "done": [{ "text": "Core movement prototype (demo)" }],
+      "next": [],
+      "blockers": [{ "text": "Paused: lower priority than paid work" }],
+      "decisions": [],
+      "links": []
+    }
+  },
+  "scene": { "elements": [] },
+  "log": [{ "id": "l_seed", "at": "2026-11-14T22:00:00.000Z", "by": "seed", "msg": "Demo board created. Everything marked DEMO is fictional sample data." }]
+}
