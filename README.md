@@ -7,15 +7,19 @@ all read and write the **same** private board. See `DESIGN.md` for the architect
 
 ## Open it
 
-**On the Mac (works now):**
-```bash
-cd ~/ops-whiteboard && npm run serve
-```
-Then open http://127.0.0.1:4173/. It uses your existing `gh` login, and no token is stored in the browser.
+**Phone (installable web app):** https://maxwellanth.github.io/ops-whiteboard/
+1. Android Chrome: open the link, then ⋮ → **Add to Home screen / Install app**. iPhone Safari: Share → **Add to Home Screen**.
+2. Open it **from the home-screen icon** and connect there. (On iPhone the home-screen app keeps its own storage, separate from Safari.)
+3. Paste a fine-grained GitHub token that you create yourself: **Only select repositories → ops-board-data**, **Contents: Read and write**. It is stored only on that device.
 
-**On the phone:** not deployed yet. That needs your OK to publish the app **code** (not the
-data) as a public GitHub Pages site; see the status table below. Once it's published, open the Pages URL, follow
-the one-time token steps on screen, then use Share → Add to Home Screen.
+It's a web app (PWA), not a native store app. Offline it opens the app shell plus the last board copy this device
+downloaded, clearly labelled as possibly out of date. Edits made offline stay on the device until GitHub accepts them.
+
+**Mac:** `cd ~/ops-whiteboard && npm run serve`, then http://127.0.0.1:4173/ (uses the Mac's `gh` login, no token).
+
+**Using the board:** fixed scale (no zoom). One finger pans; tap a project to read and edit it. A pen (e.g. S Pen)
+draws with the marker. **lens** opens a movable magnifier, and pen strokes inside it land at the same board spot.
+**tools** shows the eraser, colours and select tools. **more** has new project, history and snapshots.
 
 ## Assistants
 `board` is on PATH (`~/.local/bin/board`). Examples:
@@ -31,20 +35,14 @@ board export --drive
 ## Status of each piece (verified 2026-11-14)
 | Piece | Status |
 |---|---|
-| Private data repo `maxwellanth/ops-board-data` | ✅ Works. Unauthenticated reads return 404. |
-| Mac app (`npm run serve`) | ✅ Works. The proxy listens on 127.0.0.1 only and rejects other hosts, origins and repos. |
-| Codex writes through `board` | ✅ Tested with a real `codex exec` run. |
-| Claude writes through `board` | ✅ Tested with a separate `claude -p` process. |
-| Simultaneous writes | ✅ 3 parallel writes all landed (automatic re-read and retry). |
-| Your edit vs an assistant's edit to the same field | ✅ Your value kept; the other value saved as a conflict note on the card. |
-| Reopen with unsynced edits | ✅ The edits were restored from the device and merged with changes made meanwhile. |
-| History / restore | ✅ Every save is a commit. Restore makes a new commit. |
-| Snapshot (.html, printable) and PNG | ✅ Generated in the app (127 KB HTML with drawing, 690 KB PNG). |
-| `board export` local files | ✅ Works. |
-| Drive copy via `rclone` (`board export --drive`) | ❌ The `gdrive:` remote has read-only scope. Fix it yourself with `rclone config reconnect gdrive:` and grant write access. |
-| Drive copy via the Claude Drive connector | ✅ Worked once from a Claude session (file read back at the same size). Codex can't use it. |
-| Phone access via GitHub Pages | ⏳ Not deployed. Needs your OK to make the app-code repo public. |
-| Automatic LIVE detection | ❌ None. LIVE appears only when an agent runs `heartbeat` with evidence, and it expires after 10 minutes. |
-| Real iPhone test | ⏳ Only tested in a 375×812 emulated phone viewport. |
+| Live URL (GitHub Pages, app code only) | ✅ HTTPS. The service worker is active, the manifest and all icons are served, and only the sign-in shows without a token. |
+| Private data repo `maxwellanth/ops-board-data` | ✅ Unauthenticated reads return 404. The public code has no data or credentials. |
+| Phone sign-in on the live URL | ⏳ Waiting on Max's own token. The authenticated live board isn't tested yet (the same code is tested in Mac mode). |
+| Codex and Claude: text updates and freehand drawing | ✅ Real `codex exec` and `claude -p` runs each drew an original doodle with `board draw`. |
+| Conflicts, reopening offline, history and restore, exports | ✅ Tested earlier this session. |
+| Fixed scale, finger pan, no pinch, wheel or keyboard zoom | ✅ Browser **simulation** only (synthetic pointer, wheel and key events at 375×812). |
+| Pen drawing, and drawing through the magnifier at the same coordinates | ✅ Browser **simulation** with synthetic pen events (coordinates matched exactly). |
+| Real S Pen, pressure, palm rejection | ❌ Not tested. No Samsung device was reachable from the Mac. Needs Max's own test. |
+| Drive copy via `rclone` | ❌ The `gdrive:` remote is read-only. The Claude Drive connector upload worked once. |
 
 Demo projects are fictional and labelled DEMO on the board.
